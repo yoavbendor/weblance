@@ -1,0 +1,6 @@
+{
+ "rows": 25000,
+ "first_row": 0,
+ "format": "uint16 x,y interleaved, row i = dataset row i",
+ "source": "UMAP (cosine, n_neighbors=30, min_dist=0.05, random_state=7) of the SigLIP2 vectors of rows 0..24999"
+}

@@ -1,0 +1,146 @@
+[
+{
+"x": 0.3763,
+"y": 0.5152,
+"n": 769,
+"label": "boat / water"
+},
+{
+"x": 0.4061,
+"y": 0.1263,
+"n": 1748,
+"label": "room / kitchen"
+},
+{
+"x": 0.2041,
+"y": 0.4819,
+"n": 739,
+"label": "train / tracks"
+},
+{
+"x": 0.5015,
+"y": 0.05,
+"n": 836,
+"label": "bananas / banana"
+},
+{
+"x": 0.4431,
+"y": 0.2268,
+"n": 1465,
+"label": "phone / teddy"
+},
+{
+"x": 0.02,
+"y": 0.5129,
+"n": 529,
+"label": "airplane / plane"
+},
+{
+"x": 0.518,
+"y": 0.1952,
+"n": 1601,
+"label": "tie / wii"
+},
+{
+"x": 0.5739,
+"y": 0.8353,
+"n": 1048,
+"label": "snow / skis"
+},
+{
+"x": 0.2723,
+"y": 0.0878,
+"n": 1182,
+"label": "bathroom / toilet"
+},
+{
+"x": 0.3237,
+"y": 0.247,
+"n": 1375,
+"label": "cat / dog"
+},
+{
+"x": 0.3845,
+"y": 0.4288,
+"n": 612,
+"label": "motorcycle / parked"
+},
+{
+"x": 0.2862,
+"y": 0.439,
+"n": 711,
+"label": "bus / street"
+},
+{
+"x": 0.5903,
+"y": 0.042,
+"n": 1208,
+"label": "plate / food"
+},
+{
+"x": 0.622,
+"y": 0.111,
+"n": 1472,
+"label": "pizza / cake"
+},
+{
+"x": 0.3834,
+"y": 0.3619,
+"n": 882,
+"label": "bench / umbrella"
+},
+{
+"x": 0.7858,
+"y": 0.4688,
+"n": 496,
+"label": "frisbee / soccer"
+},
+{
+"x": 0.3483,
+"y": 0.6181,
+"n": 1439,
+"label": "sheep / horse"
+},
+{
+"x": 0.1715,
+"y": 0.7537,
+"n": 1370,
+"label": "giraffe / elephant"
+},
+{
+"x": 0.9646,
+"y": 0.3471,
+"n": 738,
+"label": "tennis / court"
+},
+{
+"x": 0.9695,
+"y": 0.4907,
+"n": 660,
+"label": "baseball / bat"
+},
+{
+"x": 0.2154,
+"y": 0.3907,
+"n": 593,
+"label": "clock / tower"
+},
+{
+"x": 0.2966,
+"y": 0.3387,
+"n": 307,
+"label": "hydrant / fire"
+},
+{
+"x": 0.58,
+"y": 0.4999,
+"n": 2017,
+"label": "skateboard / riding"
+},
+{
+"x": 0.2963,
+"y": 0.3887,
+"n": 1203,
+"label": "sign / street"
+}
+]

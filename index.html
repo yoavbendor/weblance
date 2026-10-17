@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lance in the browser</title>
+  <meta name="description" content="Reads a 48 GB Lance dataset on Hugging Face from the browser, with no server and no download, using nanolance compiled to WebAssembly.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <p class="eyebrow">weblance &middot; nanolance in WebAssembly</p>
+      <h1>Lance in the browser</h1>
+      <p class="lede">This page reads a 48 GB Lance dataset on Hugging Face directly from your browser &mdash; no server, no download &mdash; using nanolance compiled to WebAssembly. The module is 1,025,876 bytes (433,074 bytes gzipped).</p>
+      <p class="status" id="status" aria-live="polite">Starting...</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="grid">
+      <div class="panel map-panel">
+        <div class="map-wrap" id="map-wrap">
+          <canvas id="map" role="img" aria-label="Scatter map of 25,000 COCO images placed by their image embeddings and colored by region. Click to load the nearest images."></canvas>
+        </div>
+        <p class="hint" id="hint">Loading the map...</p>
+        <div class="pool" id="pool" aria-label="Worker pool"></div>
+      </div>
+
+      <div class="panel gallery-panel">
+        <h2>Nearest images</h2>
+        <div class="gallery" id="gallery">
+          <p class="empty">Click the map. The 12 nearest points are fetched live from the dataset: each caption and image appears as its row arrives.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel stats" aria-labelledby="live-h">
+      <h2 id="live-h">Live numbers</h2>
+      <dl>
+        <div><dt>HTTP requests, all workers</dt><dd id="s-requests">0</dd></div>
+        <div><dt>Bytes fetched</dt><dd id="s-bytes">0 B</dd></div>
+        <div><dt>Share of the 48 GB file</dt><dd id="s-fraction">0%</dd></div>
+        <div><dt>Time per image, mean</dt><dd id="s-per-image">-</dd></div>
+        <div><dt>Dataset open, first worker</dt><dd id="s-open-first">...</dd></div>
+        <div><dt>Dataset open, all six</dt><dd id="s-open-all">...</dd></div>
+        <div><dt>Last click: requests</dt><dd id="s-click-requests">-</dd></div>
+        <div><dt>Last click: bytes</dt><dd id="s-click-bytes">-</dd></div>
+        <div><dt>Last click: first image</dt><dd id="s-click-first">-</dd></div>
+        <div><dt>Last click: last image</dt><dd id="s-click-last">-</dd></div>
+      </dl>
+      <p class="note">Measured in your browser: each worker reports the request and byte counters of its own reads. Bytes count the bodies of the range reads; the request count also includes directory listings.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="how-h">
+      <h2 id="how-h">How this works</h2>
+      <ul class="how">
+        <li>The map is precomputed offline: UMAP of the SigLIP2 vectors of rows 0-24,999; the region names come from their captions. It is a 100 KB file shipped with this page: 25,000 points of two 16-bit coordinates.</li>
+        <li>Every caption and image is fetched live from Hugging Face with HTTP Range requests, by nanolance running in a Web Worker. Six workers each open the dataset once; a click spreads its rows across the idle ones.</li>
+        <li>The dataset's single 48 GB data file is never downloaded. Only the bytes of the rows you click are fetched.</li>
+        <li>The numbers on this page are measured in your browser, not estimated.</li>
+      </ul>
+    </section>
+
+    <section class="panel" aria-labelledby="credit-h">
+      <h2 id="credit-h">Credits</h2>
+      <ul class="how">
+        <li>Dataset: <a href="https://huggingface.co/datasets/jrmiller/coco-2017-siglip2-embeddings">jrmiller/coco-2017-siglip2-embeddings</a> (MIT), 287,360 COCO 2017 images with captions and SigLIP2 embeddings.</li>
+        <li>Images: COCO 2017, from Flickr, under their own licenses; see the <a href="https://cocodataset.org/#termsofuse">COCO terms of use</a>.</li>
+        <li>Format: <a href="https://lancedb.github.io/lance/">Lance</a>. Reader: nanolance (Apache-2.0, Copyright (c) 2026 Yoav Bendor); third-party notices in <a href="LICENSE-NOTICES.md">LICENSE-NOTICES.md</a>.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>Static page: no server and no external requests except the dataset. <a href="README.md">README</a></p>
+  </footer>
+</body>
+</html>
