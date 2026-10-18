@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Explore a Lance dataset</title>
+  <meta name="description" content="Open a Lance image dataset on Hugging Face in the browser: its embeddings are laid out in 2D, and any point shows its image. Nanolance in WebAssembly, no server.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .controls input[type="url"] {
+      flex: 1 1 280px; min-width: 0; font: inherit; padding: 9px 10px; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+    }
+    button {
+      font: inherit; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+      border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .presets button { font-size: 13px; padding: 5px 10px; }
+    .tables { margin-top: 10px; }
+    .tables select { font: inherit; padding: 6px 8px; border-radius: 8px; max-width: 100%; }
+    .columns { margin: 10px 0 0; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
+    .columns b { color: var(--fg); font-weight: 600; }
+    .message { margin: 10px 0 0; color: var(--err); }
+    .thumb.loading { background: linear-gradient(90deg, var(--line), var(--panel), var(--line)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+    @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+    .card figcaption { min-height: 1.4em; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; color: var(--accent); }
+    pre { font-family: var(--mono); font-size: 13px; background: var(--bg); border: 1px solid var(--line);
+          border-radius: 8px; padding: 10px; overflow-x: auto; max-width: 100%; }
+    .back { font-size: 14px; }
+    @media (prefers-reduced-motion: reduce) { .thumb.loading { animation: none; } }
+  </style>
+  <script src="explore.js" defer></script>
+</head>
+<body>
+  <header class="site">
+    <div class="wrap">
+      <p class="eyebrow">weblance &middot; explore</p>
+      <h1>Explore a Lance image dataset</h1>
+      <p class="lede">The Lance file is read in place with HTTP Range requests by nanolance compiled to WebAssembly; nothing was precomputed. Its embeddings are laid out in 2D and colored by class; click the map to see the images nearest a point.</p>
+      <p class="back"><a href="index.html">&larr; Lance in the browser (COCO map)</a></p>
+      <p class="status" id="status" aria-live="polite">Paste a Hugging Face dataset URL, or pick a preset.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="panel" aria-labelledby="open-h">
+      <h2 id="open-h">Open a dataset</h2>
+      <form class="controls" id="open-form">
+        <input type="url" id="ds-input" placeholder="https://huggingface.co/datasets/owner/name" aria-label="Hugging Face dataset URL" autocomplete="off">
+        <button type="submit" class="primary" id="open-button">Open</button>
+      </form>
+      <div class="presets" id="presets" aria-label="Preset datasets"></div>
+      <div class="tables" id="tables" hidden>
+        <label>Lance table <select id="table-select" aria-label="Lance table"></select></label>
+      </div>
+      <p class="columns" id="columns" aria-live="polite"></p>
+      <p class="message" id="message" role="alert" hidden></p>
+    </section>
+
+    <section class="grid">
+      <div class="panel map-panel">
+        <div class="map-wrap" id="map-wrap">
+          <canvas id="map" role="img" aria-label="Scatter map of sampled rows, placed by their embeddings and colored by class. Click to see the nearest images."></canvas>
+        </div>
+        <p class="hint" id="hint">The map appears when the sample is read.</p>
+      </div>
+
+      <div class="panel gallery-panel">
+        <h2>Nearest images</h2>
+        <div class="gallery" id="gallery">
+          <p class="empty">Click the map: the 12 nearest sampled points are fetched from the dataset, one image at a time.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel stats" aria-labelledby="live-h">
+      <h2 id="live-h">Live numbers</h2>
+      <dl>
+        <div><dt>HTTP requests, all workers</dt><dd id="s-requests">0</dd></div>
+        <div><dt>Bytes fetched</dt><dd id="s-bytes">0 B</dd></div>
+        <div><dt>Rows sampled</dt><dd id="s-rows">-</dd></div>
+        <div><dt>Sample: requests</dt><dd id="s-sample-requests">-</dd></div>
+        <div><dt>Sample: bytes</dt><dd id="s-sample-bytes">-</dd></div>
+        <div><dt>Last click: requests</dt><dd id="s-click-requests">-</dd></div>
+        <div><dt>Last click: bytes</dt><dd id="s-click-bytes">-</dd></div>
+      </dl>
+      <p class="note">Measured in your browser: each worker reports the request and byte counters of its own reads, directory listings included.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="how-h">
+      <h2 id="how-h">How this works</h2>
+      <ul class="how">
+        <li>The table is read where it lives: the module asks Hugging Face for byte ranges of the Lance files, and the vectors of up to 5,000 rows (ten windows of 500 rows, spread over the table) are laid out with PCA in a Web Worker.</li>
+        <li>Colors are the dataset's own labels when it has a label column; otherwise regions of the layout, named by their captions.</li>
+      </ul>
+      <details>
+        <summary>Make a dataset like this with pylance</summary>
+        <pre><code>import lance, pyarrow as pa
+emb = pa.FixedSizeListArray.from_arrays(pa.array(vectors.ravel(), pa.float32()), 512)
+lance.write_dataset(pa.table({"image": pa.array(jpegs, pa.binary()), "label_name": labels, "image_emb": emb}), "my_images.lance")</code></pre>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="credit-h">
+      <h2 id="credit-h">Credits</h2>
+      <ul class="how">
+        <li>Presets: <a href="https://huggingface.co/lance-format">lance-format</a> datasets (MNIST, CIFAR-10, Oxford Pets, Food-101), <a href="https://huggingface.co/datasets/jrmiller/coco-2017-siglip2-embeddings">jrmiller/coco-2017-siglip2-embeddings</a> (MIT).</li>
+        <li>Reader: nanolance (Apache-2.0, Copyright (c) 2026 Yoav Bendor); third-party notices in <a href="LICENSE-NOTICES.md">LICENSE-NOTICES.md</a>.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>Static page: no server; the only requests go to Hugging Face. <a href="index.html">Lance in the browser</a> &middot; <a href="README.md">README</a></p>
+  </footer>
+</body>
+</html>

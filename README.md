@@ -10,11 +10,17 @@ click are fetched; the dataset's 48 GB data file is never downloaded.
 Dataset: [jrmiller/coco-2017-siglip2-embeddings](https://huggingface.co/datasets/jrmiller/coco-2017-siglip2-embeddings)
 (MIT), 287,360 COCO 2017 images with captions and SigLIP2 vectors. The map is a UMAP of the vectors of rows 0-24,999.
 
+`explore.html` opens any public Hugging Face Lance image dataset: paste its URL (or pick MNIST, CIFAR-10, Oxford
+Pets, Food-101 or COCO). The page finds the Lance table, picks the image, embedding and label columns, reads up to
+5,000 rows' vectors (ten windows of 500 rows, about 10 MB and 160-190 requests on MNIST and Food-101), lays them out
+with PCA in a worker, colors them by class, and fetches the 12 images nearest a click. Nothing is precomputed.
+
 ## Files
 
 - `index.html`, `style.css`, `app.js`: the page (map, gallery, live counters, design tokens for light and dark).
 - `worker.js`: one worker of the pool. Loads `lib/weblance.js`, opens the dataset once, reads one row at a time.
-- `lib/weblance.js`, `lib/weblance.wasm`: the module (1,025,876 bytes; 433,074 bytes with `gzip -9`).
+- `explore.html`, `explore.js`, `explore-worker.js`: the explore page and its worker (sampling, PCA, k-means).
+- `lib/weblance.js`, `lib/weblance.wasm`: the module (1,027,128 bytes; 433,623 bytes with `gzip -9`).
 - `data/points.bin`: 25,000 map points, two little-endian `uint16` values each (x, y), row i = dataset row i.
 - `data/labels.json`: the 24 region names and their centers (0..1), from the captions.
 - `data/points.json`: a description of the map file.
