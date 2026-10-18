@@ -43,6 +43,7 @@ let firstError = '';
 let click = null; // the click being served: {id, t0, rows, pending, done, cards, firstMs, lastMs, requests, bytes}
 let clickSeq = 0;
 const objectUrls = [];
+const r1 = (x) => Math.round(x * 10) / 10;
 
 function addTotals(stats) {
   if (!stats) return;
@@ -88,6 +89,7 @@ function startPool() {
     const worker = new Worker('worker.js');
     const slot = { index: i, worker, dot, ready: false, failed: false, busy: false, row: null };
     setDot(slot, 'connecting');
+    wlDebug.attachWorker(worker, 'w' + (i + 1));
     worker.onmessage = (ev) => onWorkerMessage(slot, ev.data);
     worker.onerror = (e) => onWorkerError(slot, e);
     slots.push(slot);
@@ -100,10 +102,14 @@ function startPool() {
 }
 
 function onWorkerMessage(slot, m) {
+  if (m.type === 'abort') return;  // logged by wlDebug; the reply that follows is the one that counts
   if (m.type === 'open') {
     addTotals(m.stats);
     openSettled++;
     if (m.ok) {
+      wlDebug.log('open', { w: slot.index + 1, ms: r1(m.ms), req: m.stats.requests, bytes: m.stats.bytes,
+        heapBytes: m.heap, jsMB: wlDebug.mem(), wasmBytes: m.module && m.module.transfer,
+        wasmDecodedBytes: m.module && m.module.decoded });
       slot.ready = true;
       setDot(slot, 'ready', 'dataset open');
       if (firstOpenMs === null) firstOpenMs = performance.now() - pageStart;
@@ -122,6 +128,7 @@ function onWorkerMessage(slot, m) {
   slot.busy = false;
   slot.row = null;
   addTotals(m.stats);
+  m.w = slot.index + 1;
   if (click && m.id === click.id) takeRowResult(m);
   dispatch();
   updateStats();
@@ -206,6 +213,13 @@ function failCard(card, message) {
   card.text.textContent = '(no caption)';
 }
 
+// One line per image row of the click: worker, time, requests, bytes, image size, decode time.
+function logRow(m, extra) {
+  const s = m.stats || { requests: 0, bytes: 0 };
+  wlDebug.log('click.image', Object.assign({ w: m.w, row: m.row, ms: r1(m.ms), req: s.requests, bytes: s.bytes,
+    imageBytes: m.image ? m.image.byteLength : undefined, heapBytes: m.heap, jsMB: wlDebug.mem() }, extra));
+}
+
 function takeRowResult(m) {
   const c = click;
   const card = c.cards.get(m.row);
@@ -217,21 +231,32 @@ function takeRowResult(m) {
     c.requests += m.stats.requests;
     c.bytes += m.stats.bytes;
   }
+  if (m.heap) c.heapBytes = m.heap;
   perImage.sum += m.ms;
   perImage.count++;
+  if (c.done === c.rows.length) {
+    wlDebug.log('click.done', { ms: r1(t), firstMs: r1(c.firstMs), req: c.requests, bytes: c.bytes,
+      heapBytes: c.heapBytes, jsMB: wlDebug.mem() });
+  }
   if (!card) return;
   if (!m.ok) {
     failCard(card, m.error);
+    logRow(m, { ok: false, error: m.error });
     return;
   }
   card.text.textContent = m.caption === null || m.caption === '' ? '(no caption)' : m.caption;
   const url = URL.createObjectURL(new Blob([m.image], { type: m.imageType }));
   objectUrls.push(url);
+  const decodeStart = performance.now();
   card.img.onload = () => {
     card.node.classList.add('loaded');
     card.wait.remove();
+    logRow(m, { ok: true, decodeMs: r1(performance.now() - decodeStart) });
   };
-  card.img.onerror = () => failCard(card, 'the image did not decode');
+  card.img.onerror = () => {
+    failCard(card, 'the image did not decode');
+    logRow(m, { ok: false, error: 'the image did not decode' });
+  };
   card.img.src = url;
 }
 
@@ -248,8 +273,9 @@ function startClick(rows) {
   }
   click = {
     id, t0: performance.now(), rows, pending: rows.slice(), done: 0, cards,
-    firstMs: null, lastMs: null, requests: 0, bytes: 0,
+    firstMs: null, lastMs: null, requests: 0, bytes: 0, heapBytes: 0,
   };
+  wlDebug.log('click', { rows: rows.join(' '), n: rows.length });
   selected = rows;
   scheduleDraw();
   dispatch();
@@ -452,6 +478,7 @@ function kNearest(x, y, k) {
 }
 
 async function loadMap() {
+  const endMap = wlDebug.span('map.load', { url: POINTS_URL });
   try {
     const [pbuf, labelsJson] = await Promise.all([
       fetch(POINTS_URL).then((r) => {
@@ -471,7 +498,9 @@ async function loadMap() {
     el.hint.textContent =
       'Each dot is one of the ' + npts.toLocaleString('en-US') + ' map points, colored by its nearest region. ' +
       'Click the map to load the ' + NEIGHBOURS + ' nearest images, with their captions, from the dataset.';
+    endMap({ points: npts });
   } catch (e) {
+    endMap({ error: e.message });
     el.hint.textContent = 'The map did not load: ' + e.message;
   }
 }

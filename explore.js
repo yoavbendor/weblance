@@ -50,8 +50,11 @@ let clickSeq = 0;
 let objectUrls = [];
 let cssW = 0, cssH = 0, dpr = 1;
 let selected = [];
+let treeRequests = 0;   // Hugging Face tree API requests, for the debug log
 const totals = { requests: 0, bytes: 0 };   // every request since the table was opened
 const sampleTotals = { requests: 0, bytes: 0 };  // the sample's windows
+
+const r1 = (x) => Math.round(x * 10) / 10;
 
 function fmtBytes(n) {
   if (n < 1024) return n + ' B';
@@ -93,6 +96,7 @@ function addTotals(stats, bucket) {
 function makeSlot(index) {
   const worker = new Worker('explore-worker.js');
   const slot = { index, worker, queue: [], opening: null };
+  wlDebug.attachWorker(worker, 'w' + (index + 1));
   worker.onmessage = (ev) => onWorkerMessage(slot, ev.data);
   worker.onerror = (e) => {
     const failed = slot.queue.splice(0);
@@ -110,6 +114,7 @@ function request(slot, msg, { onProgress = null, bucket = null } = {}) {
 }
 
 function onWorkerMessage(slot, m) {
+  if (m.type === 'abort') return;  // logged by wlDebug; the reply that follows is the one that counts
   if (m.type === 'progress') {
     const head = slot.queue[0];
     if (head) {
@@ -134,7 +139,16 @@ function resetPool() {
 
 // Each worker opens the table once, on its first request; the requests queue behind the open.
 function ensureOpen(slot) {
-  if (!slot.opening) slot.opening = request(slot, { type: 'open', ds: tableUrl }, { bucket: sampleTotals });
+  if (!slot.opening) {
+    // debug_fail is a test-only hook: the worker's open fails (see explore-worker.js).
+    slot.opening = request(slot, { type: 'open', ds: tableUrl, fail: params.get('debug_fail') || undefined },
+      { bucket: sampleTotals }).then((m) => {
+      wlDebug.log('open', { w: slot.index + 1, ms: r1(m.ms), req: m.stats.requests, bytes: m.stats.bytes,
+        heapBytes: m.heap, jsMB: wlDebug.mem(), wasmBytes: m.module && m.module.transfer,
+        wasmDecodedBytes: m.module && m.module.decoded });
+      return m;
+    });
+  }
   return slot.opening;
 }
 
@@ -154,8 +168,10 @@ async function listTree(owner, name, dir) {
   const url = `https://huggingface.co/api/datasets/${owner}/${name}/tree/main${encoded}`;
   let r;
   try {
+    treeRequests++;
     r = await fetch(url);
   } catch (e) {
+    treeRequests++;
     r = await fetch(url);  // one retry: a single network failure should not end the visit
   }
   if (!r.ok) throw new Error(`Hugging Face tree API answered ${r.status} for ${dir || 'the top level'}`);
@@ -299,6 +315,8 @@ function showColumns() {
   else if (cols.caption) parts.push(`<b>caption</b> = ${cols.caption} (regions named by their words)`);
   else parts.push('no class column');
   el.columns.innerHTML = `${info.rows.toLocaleString('en-US')} rows. Columns used: ${parts.join(', ')}.`;
+  wlDebug.log('columns', { rows: info.rows, image: cols.image, vector: cols.vector && cols.vector.name,
+    dim: cols.vector && cols.vector.dim, label: cols.label && cols.label.name, caption: cols.caption });
 }
 
 async function sampleAndMap(seq) {
@@ -307,8 +325,10 @@ async function sampleAndMap(seq) {
   const total = windows.reduce((a, w) => a + w[1], 0);
   el.hint.textContent = 'Reading ' + total.toLocaleString('en-US') + ' sampled rows...';
   const label = cols.label ? cols.label.name : null;
+  const endSample = wlDebug.span('sample.total', { windows: windows.length, rows: total });
   const onProgress = (m) => {
     if (seq !== loadSeq) return;
+    wlDebug.log('sample.window', { start: m.start, rows: m.len, ms: r1(m.ms), req: m.stats.requests, bytes: m.stats.bytes });
     setText('s-sample-requests', sampleTotals.requests.toLocaleString('en-US'));
     setText('s-sample-bytes', fmtBytes(sampleTotals.bytes));
     setStatus(`Reading rows: ${m.done.toLocaleString('en-US')} of ${m.total.toLocaleString('en-US')}; ` +
@@ -320,11 +340,18 @@ async function sampleAndMap(seq) {
   }, { onProgress, bucket: sampleTotals });
   if (seq !== loadSeq) return;
   sample = layoutSample(r, n);
+  wlDebug.log('heap', { w: 1, heapBytes: r.heap, jsMB: wlDebug.mem() });
+  wlDebug.log('pca', { ms: r1(r.pcaMs), dim: r.dim, kept: r.kept });
+  wlDebug.log('kmeans', { ms: r1(r.kmeansMs), k: r.centers.length });
+  endSample({ rows: sample.rows.length, req: sampleTotals.requests, bytes: sampleTotals.bytes, jsMB: wlDebug.mem() });
   setText('s-rows', sample.rows.length.toLocaleString('en-US'));
   setText('s-sample-requests', sampleTotals.requests.toLocaleString('en-US'));
   setText('s-sample-bytes', fmtBytes(sampleTotals.bytes));
   describeGroups();
+  const endDraw = wlDebug.span('map.draw', { points: sample.kept });
   sizeCanvas();
+  endDraw();
+  wlDebug.log('classes', { n: new Set(sample.labels).size, byClass: sample.byClass, groups: sample.groupLabels.length });
   if (!cols.image) el.hint.textContent += ' This table has no image column.';
   setStatus(`Sampled ${sample.rows.length.toLocaleString('en-US')} rows of ${n.toLocaleString('en-US')} ` +
     `in ${sampleTotals.requests.toLocaleString('en-US')} requests (${fmtBytes(sampleTotals.bytes)}). Click the map.`);
@@ -570,6 +597,13 @@ function addCard(bytes, label) {
   return node;
 }
 
+// One line per image of a click: worker, time, requests, bytes, image size, decode time.
+function logClickImage(m, w, row, extra) {
+  const s = m.stats || { requests: 0, bytes: 0 };
+  wlDebug.log('click.image', Object.assign({ w, row, ms: r1(m.ms), req: s.requests, bytes: s.bytes,
+    imageBytes: m.image ? m.image.byteLength : undefined, heapBytes: m.heap, jsMB: wlDebug.mem() }, extra));
+}
+
 function startClick(px, py) {
   if (!sample) return;
   const id = ++clickSeq;
@@ -587,6 +621,9 @@ function startClick(px, py) {
     setText('s-click-bytes', fmtBytes(bucket.bytes));
   };
   shown();
+  const tc = performance.now();
+  let lastHeap = 0;
+  wlDebug.log('click', { rows: idx.map((k) => sample.rows[k]).join(' '), n: idx.length });
   const pending = idx.map((k, j) => {
     const label = cols.label ? (cols.label.kind === 'int' ? 'class ' + sample.labels[k] : String(sample.labels[k]).replace(/_/g, ' ')) : '';
     const node = document.createElement('figure');
@@ -602,7 +639,15 @@ function startClick(px, py) {
       thumb.classList.remove('loading');
       const img = document.createElement('img');
       img.alt = label;
-      img.onload = () => node.classList.add('loaded');  // style.css shows a card's image once it has loaded
+      const w = j % pool.length + 1;
+      const row = sample.rows[k];
+      const decodeStart = performance.now();
+      if (m.heap) lastHeap = m.heap;
+      img.onload = () => {
+        node.classList.add('loaded');  // style.css shows a card's image once it has loaded
+        logClickImage(m, w, row, { ok: true, decodeMs: r1(performance.now() - decodeStart) });
+      };
+      img.onerror = () => logClickImage(m, w, row, { ok: false, error: 'the image did not decode' });
       img.src = url;
       thumb.appendChild(img);
       node.querySelector('figcaption').textContent = label;
@@ -611,9 +656,14 @@ function startClick(px, py) {
       if (id !== clickSeq) return;
       node.querySelector('.thumb').classList.remove('loading');
       node.querySelector('figcaption').textContent = 'failed: ' + e.message;
+      wlDebug.log('click.image', { w: j % pool.length + 1, row: sample.rows[k], ok: false, error: String(e.message) });
     });
   });
-  Promise.all(pending).then(shown);
+  Promise.all(pending).then(() => {
+    shown();
+    wlDebug.log('click.done', { ms: r1(performance.now() - tc), req: bucket.requests, bytes: bucket.bytes,
+      heapBytes: lastHeap, jsMB: wlDebug.mem() });
+  });
 }
 
 function setupMapEvents() {
@@ -645,13 +695,18 @@ async function openFromInput(text) {
     const { owner, name, path } = parseInput(text);
     setQuery(`${owner}/${name}`, path);
     setStatus(`Looking for Lance tables in ${owner}/${name}...`);
+    wlDebug.log('input', { value: text });
+    const endTree = wlDebug.span('tree', { dataset: owner + '/' + name, path });
+    const treeBefore = treeRequests;
     const tables = await findTables(owner, name, path);
+    endTree({ req: treeRequests - treeBefore, tables: tables.length });
     if (seq !== loadSeq) return;
     if (!tables.length) throw new Error('No .lance directory found at the top level or one level down.');
     fillSelect(owner, name, tables);
     await openTable(tableUrlFor(owner, name, tables[0]), seq);
   } catch (e) {
     if (seq !== loadSeq) return;
+    wlDebug.log('error', { msg: String((e && e.message) || e), where: 'open' });
     showMessage(String((e && e.message) || e));
     setStatus('Could not show this dataset.');
   } finally {

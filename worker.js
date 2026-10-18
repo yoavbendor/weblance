@@ -41,6 +41,12 @@ function takeStats() {
   return { requests: s.requests, bytes: s.bytes, ms: s.ms };
 }
 
+// The module's transfer and decoded size, from this worker's resource timing.
+function moduleSize() {
+  const e = self.performance.getEntriesByType('resource').find((r) => /weblance\.wasm(\?|$)/.test(r.name));
+  return e ? { transfer: e.transferSize, decoded: e.decodedBodySize } : null;
+}
+
 function sniffImageType(b) {
   if (b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg';
   if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
@@ -75,13 +81,16 @@ async function openDataset(ds) {
   const t0 = performance.now();
   try {
     // The module loads from lib/; without this Emscripten looks next to the worker script.
-    M = await createWeblance({ locateFile: (p) => 'lib/' + p });
+    // An Emscripten abort (out of memory, a failed range read) is posted before the worker's error reply.
+    M = await createWeblance({ locateFile: (p) => 'lib/' + p,
+      onAbort: (what) => post({ type: 'abort', what: String(what) }) });
     const p = utf8(ds);
     handle = M.ccall('wl_open', 'number', ['number'], [p]);
     M._free(p);
     if (!handle) throw new Error('wl_open: ' + lastError());
     const info = JSON.parse(takeText(M.ccall('wl_info_json', 'number', ['number'], [handle])));
-    post({ type: 'open', ok: true, ms: performance.now() - t0, info, stats: takeStats() });
+    post({ type: 'open', ok: true, ms: performance.now() - t0, info, stats: takeStats(),
+      heap: M.HEAPU8.length, module: moduleSize() });
   } catch (e) {
     const stats = M ? takeStats() : { requests: 0, bytes: 0, ms: 0 };
     post({ type: 'open', ok: false, error: String((e && e.message) || e), stats });
@@ -96,12 +105,12 @@ function doRow(m) {
     const ms = performance.now() - t0;
     post(
       { type: 'row', id: m.id, row: m.row, ok: true, caption, image: bytes.buffer,
-        imageType: sniffImageType(bytes), ms, stats: takeStats() },
+        imageType: sniffImageType(bytes), ms, stats: takeStats(), heap: M.HEAPU8.length },
       [bytes.buffer]
     );
   } catch (e) {
     post({ type: 'row', id: m.id, row: m.row, ok: false, error: String((e && e.message) || e),
-      ms: performance.now() - t0, stats: takeStats() });
+      ms: performance.now() - t0, stats: takeStats(), heap: M ? M.HEAPU8.length : 0 });
   }
 }
 

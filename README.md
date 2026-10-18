@@ -20,6 +20,9 @@ with PCA in a worker, colors them by class, and fetches the 12 images nearest a 
 - `index.html`, `style.css`, `app.js`: the page (map, gallery, live counters, design tokens for light and dark).
 - `worker.js`: one worker of the pool. Loads `lib/weblance.js`, opens the dataset once, reads one row at a time.
 - `explore.html`, `explore.js`, `explore-worker.js`: the explore page and its worker (sampling, PCA, k-means).
+- `debug.js`: the debug log of both pages (timings, counters, errors), kept in `localStorage` so it survives a tab
+  crash; the footer's "debug" link, `?debug=1` or Shift+D opens it, and Copy debug report copies it as text. It is
+  stored only in the visitor's browser and never sent anywhere.
 - `lib/weblance.js`, `lib/weblance.wasm`: the module (1,027,128 bytes; 433,623 bytes with `gzip -9`).
 - `data/points.bin`: 25,000 map points, two little-endian `uint16` values each (x, y), row i = dataset row i.
 - `data/labels.json`: the 24 region names and their centers (0..1), from the captions.

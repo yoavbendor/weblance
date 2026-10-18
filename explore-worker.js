@@ -50,12 +50,20 @@ function takeStats() {
   return { requests: s.requests, bytes: s.bytes, ms: s.ms };
 }
 
+// The module's transfer and decoded size, from this worker's resource timing.
+function moduleSize() {
+  const e = self.performance.getEntriesByType('resource').find((r) => /weblance\.wasm(\?|$)/.test(r.name));
+  return e ? { transfer: e.transferSize, decoded: e.decodedBodySize } : null;
+}
+
 function addStats(a, b) {
   return { requests: a.requests + b.requests, bytes: a.bytes + b.bytes, ms: a.ms + b.ms };
 }
 
 async function ensureModule() {
-  if (!M) M = await createWeblance({ locateFile: (p) => 'lib/' + p });
+  // An Emscripten abort is posted before the worker's error reply.
+  if (!M) M = await createWeblance({ locateFile: (p) => 'lib/' + p,
+    onAbort: (what) => post({ type: 'abort', what: String(what) }) });
 }
 
 async function doOpen(ds) {
@@ -269,6 +277,7 @@ async function doSample(m) {
   let done = 0;
   const scalarCols = [m.label, m.caption].filter((c) => c);
   for (const [start, len] of m.windows) {
+    const tw = performance.now();
     const rows = Array.from({ length: len }, (_, i) => start + i);
     let delta = { requests: 0, bytes: 0, ms: 0 };  // this window, reported in its progress message
     const v = takeVectors(rows, m.vec);
@@ -287,7 +296,7 @@ async function doSample(m) {
       if (m.caption) captionsOut.push(scalars[i][m.caption]);
     }
     done += len;
-    post({ type: 'progress', id: m.id, done, total, stats: delta });
+    post({ type: 'progress', id: m.id, done, total, start, len, ms: performance.now() - tw, stats: delta });
   }
   // Flatten, then drop null vectors and normalize the rest.
   const n0 = rowsOut.length;
@@ -325,12 +334,17 @@ async function doSample(m) {
   const labels = keep.map((i) => (m.label ? labelsOut[i] : null));
   const captions = keep.map((i) => (m.caption ? captionsOut[i] : null));
   let x, y, cluster = new Uint8Array(n), centers = [];
+  let pcaMs = 0, kmeansMs = 0;
   if (n >= 3) {
+    const tp = performance.now();
     const pc = pca2(X, n, dim);
     const xy = fitUnit(pc.xs, pc.ys);
     x = xy.x;
     y = xy.y;
+    pcaMs = performance.now() - tp;
+    const tk = performance.now();
     const km = kmeans(x, y, KMEANS_K);
+    kmeansMs = performance.now() - tk;
     cluster = km.assign;
     centers = km.centers;
   } else {
@@ -339,18 +353,24 @@ async function doSample(m) {
   }
   // The counters were sent window by window (progress); this message carries the totals for reference.
   const out = { type: 'sample', id: m.id, ok: true, rows, x, y, cluster, centers, labels, captions, dim,
-    requested: total, kept: n, stats };
+    requested: total, kept: n, stats, pcaMs, kmeansMs, heap: M.HEAPU8.length };
   post(out, [rows.buffer, x.buffer, y.buffer, cluster.buffer]);
 }
 
 async function handleMessage(m) {
   try {
     if (m.type === 'open') {
+      // Test-only hook (explore.html?debug_fail=open): the open fails, to test the debug log.
+      if (m.fail === 'open') throw new Error('debug_fail=open: the test hook made this worker fail');
+      const t0 = performance.now();
       const r = await doOpen(m.ds);
-      post({ type: 'open', ok: true, info: r.info, stats: r.stats });
+      post({ type: 'open', ok: true, info: r.info, stats: r.stats, ms: performance.now() - t0,
+        heap: M.HEAPU8.length, module: moduleSize() });
     } else if (m.type === 'image') {
+      const t0 = performance.now();
       const bytes = takeBinary(m.row, m.col);
-      post({ type: 'image', id: m.id, row: m.row, ok: true, image: bytes.buffer, stats: takeStats() }, [bytes.buffer]);
+      post({ type: 'image', id: m.id, row: m.row, ok: true, image: bytes.buffer, stats: takeStats(),
+        ms: performance.now() - t0, heap: M.HEAPU8.length }, [bytes.buffer]);
     } else if (m.type === 'sample') {
       await doSample(m);
     }
