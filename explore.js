@@ -562,6 +562,7 @@ function addCard(bytes, label) {
   node.innerHTML = '<div class="thumb"></div><figcaption></figcaption>';
   const img = document.createElement('img');
   img.alt = label;
+  img.onload = () => node.classList.add('loaded');  // style.css shows a card's image once it has loaded
   img.src = url;
   node.querySelector('.thumb').appendChild(img);
   node.querySelector('figcaption').textContent = label;
@@ -587,7 +588,7 @@ function startClick(px, py) {
   };
   shown();
   const pending = idx.map((k, j) => {
-    const label = cols.label ? (cols.label.kind === 'int' ? 'class ' + sample.labels[k] : String(sample.labels[k])) : '';
+    const label = cols.label ? (cols.label.kind === 'int' ? 'class ' + sample.labels[k] : String(sample.labels[k]).replace(/_/g, ' ')) : '';
     const node = document.createElement('figure');
     node.className = 'card';
     node.innerHTML = '<div class="thumb loading"></div><figcaption></figcaption>';
@@ -601,6 +602,7 @@ function startClick(px, py) {
       thumb.classList.remove('loading');
       const img = document.createElement('img');
       img.alt = label;
+      img.onload = () => node.classList.add('loaded');  // style.css shows a card's image once it has loaded
       img.src = url;
       thumb.appendChild(img);
       node.querySelector('figcaption').textContent = label;
