@@ -2,17 +2,18 @@
 // Copyright (c) 2026 Yoav Bendor
 //
 // A worker of the explore page. It opens one Lance table through the weblance module and answers, in
-// order, three kinds of message:
-//   {type:'open', ds}                      -> {type:'open', ok, info, stats}
-//   {type:'image', id, row, col}           -> {type:'image', id, ok, image, stats}   (one binary value)
-//   {type:'sample', id, ds, windows, vec, cols}
-//        -> {type:'progress', id, done, total, stats} per window, then
-//           {type:'sample', id, ok, rows, x, y, cluster, centers, labels, captions, dim, stats (totals)}
-// The counters of a progress message are that window's; the totals are for reference, not to be added.
-// The sample reads vectors (wl_take_vectors) and the label and caption columns (wl_take_json) for
-// each window of contiguous rows, then runs PCA (top two components, power iteration with deflation)
-// and k-means (k = 16) on the 2D layout. Rows without a vector (null, or zero after normalizing) are
-// dropped from the result. The counters are summed over the calls of one message.
+// order, four kinds of message:
+//   {type:'open', ds}                              -> {type:'open', ok, info, stats, module}
+//   {type:'image', id, row, col}                   -> {type:'image', id, ok, image, stats}   (one binary value)
+//   {type:'window', id, start, len, vec, label, caption}
+//        -> {type:'window', id, ok, start, len, rows, dim, values, labels, captions, ms, stats}
+//           the vectors of contiguous rows (wl_take_vectors, a Float32Array, transferred), with their label
+//           and caption values (wl_take_json) and the counters of that window
+//   {type:'layout', id, rows, vecs, dim, label, caption, labels, captions, requested}
+//        -> {type:'layout', id, ok, rows, x, y, cluster, centers, labels, captions, dim, requested, kept, pcaMs, kmeansMs}
+// The page reads the windows of a sample on all its workers and sends them, in window order, to one
+// worker for the layout: PCA (top two components, power iteration with deflation) and k-means (k = 16) on
+// the 2D layout. Rows without a vector (null, or zero after normalizing) are dropped from the result.
 
 importScripts('lib/weblance.js');
 
@@ -265,46 +266,35 @@ function kmeans(x, y, k) {
   return { assign, centers: cx.map((v, c) => [v, cy[c]]) };
 }
 
-// Reads the windows, then lays the vectors out. windows: [[start, length], ...].
-async function doSample(m) {
-  const total = m.windows.reduce((a, w) => a + w[1], 0);
-  const vecs = [];
-  const labelsOut = [];
-  const captionsOut = [];
-  const rowsOut = [];
-  let dim = 0;
-  let stats = { requests: 0, bytes: 0, ms: 0 };  // all the windows
-  let done = 0;
+// One window of contiguous rows: its vectors (a Float32Array, transferred), its row numbers, its label and
+// caption values, and the counters of its reads. The page puts the windows of a sample together and sends
+// them to one worker for the layout (doLayout).
+async function doWindow(m) {
+  const tw = performance.now();
+  const rows = Array.from({ length: m.len }, (_, i) => m.start + i);
+  const v = takeVectors(rows, m.vec);
+  let stats = takeStats();
   const scalarCols = [m.label, m.caption].filter((c) => c);
-  for (const [start, len] of m.windows) {
-    const tw = performance.now();
-    const rows = Array.from({ length: len }, (_, i) => start + i);
-    let delta = { requests: 0, bytes: 0, ms: 0 };  // this window, reported in its progress message
-    const v = takeVectors(rows, m.vec);
-    dim = v.dim;
-    delta = addStats(delta, takeStats());
-    let scalars = [];
-    if (scalarCols.length) {
-      scalars = takeScalars(rows, scalarCols);
-      delta = addStats(delta, takeStats());
-    }
-    stats = addStats(stats, delta);
-    vecs.push(v.values);
-    for (let i = 0; i < len; i++) {
-      rowsOut.push(rows[i]);
-      if (m.label) labelsOut.push(scalars[i][m.label]);
-      if (m.caption) captionsOut.push(scalars[i][m.caption]);
-    }
-    done += len;
-    post({ type: 'progress', id: m.id, done, total, start, len, ms: performance.now() - tw, stats: delta });
+  let labels = null;
+  let captions = null;
+  if (scalarCols.length) {
+    const scalars = takeScalars(rows, scalarCols);
+    stats = addStats(stats, takeStats());
+    if (m.label) labels = scalars.map((s) => s[m.label]);
+    if (m.caption) captions = scalars.map((s) => s[m.caption]);
   }
-  // Flatten, then drop null vectors and normalize the rest.
-  const n0 = rowsOut.length;
-  const all = new Float64Array(n0 * dim);
-  let p = 0;
-  for (const block of vecs) {
-    for (let i = 0; i < block.length; i++) all[p++] = block[i];
-  }
+  const rowArr = Int32Array.from(rows);
+  post({ type: 'window', id: m.id, ok: true, start: m.start, len: m.len, rows: rowArr, dim: v.dim,
+    values: v.values, labels, captions, ms: performance.now() - tw, stats }, [rowArr.buffer, v.values.buffer]);
+}
+
+// The layout of a sample: its vectors (one flat Float32Array, the rows of all windows in window order) are
+// normalized, centered, projected on the top two components (PCA) and grouped (k-means).
+async function doLayout(m) {
+  const dim = m.dim;
+  const n0 = m.rows.length;
+  const all = new Float64Array(m.vecs);
+  // Drop null vectors and normalize the rest.
   const keep = [];
   for (let i = 0; i < n0; i++) {
     const o = i * dim;
@@ -330,9 +320,9 @@ async function doSample(m) {
   for (let j = 0; j < dim; j++) mean[j] /= Math.max(n, 1);
   for (let k = 0; k < n; k++) for (let j = 0; j < dim; j++) X[k * dim + j] -= mean[j];
 
-  const rows = Int32Array.from(keep, (i) => rowsOut[i]);
-  const labels = keep.map((i) => (m.label ? labelsOut[i] : null));
-  const captions = keep.map((i) => (m.caption ? captionsOut[i] : null));
+  const rows = Int32Array.from(keep, (i) => m.rows[i]);
+  const labels = keep.map((i) => (m.label ? m.labels[i] : null));
+  const captions = keep.map((i) => (m.caption ? m.captions[i] : null));
   let x, y, cluster = new Uint8Array(n), centers = [];
   let pcaMs = 0, kmeansMs = 0;
   if (n >= 3) {
@@ -351,9 +341,8 @@ async function doSample(m) {
     x = new Float32Array(n);
     y = new Float32Array(n);
   }
-  // The counters were sent window by window (progress); this message carries the totals for reference.
-  const out = { type: 'sample', id: m.id, ok: true, rows, x, y, cluster, centers, labels, captions, dim,
-    requested: total, kept: n, stats, pcaMs, kmeansMs, heap: M.HEAPU8.length };
+  const out = { type: 'layout', id: m.id, ok: true, rows, x, y, cluster, centers, labels, captions, dim,
+    requested: m.requested, kept: n, stats: { requests: 0, bytes: 0, ms: 0 }, pcaMs, kmeansMs, heap: M.HEAPU8.length };
   post(out, [rows.buffer, x.buffer, y.buffer, cluster.buffer]);
 }
 
@@ -371,13 +360,15 @@ async function handleMessage(m) {
       const bytes = takeBinary(m.row, m.col);
       post({ type: 'image', id: m.id, row: m.row, ok: true, image: bytes.buffer, stats: takeStats(),
         ms: performance.now() - t0, heap: M.HEAPU8.length }, [bytes.buffer]);
-    } else if (m.type === 'sample') {
-      await doSample(m);
+    } else if (m.type === 'window') {
+      await doWindow(m);
+    } else if (m.type === 'layout') {
+      await doLayout(m);
     }
   } catch (e) {
     const error = String((e && e.message) || e);
-    // The counters of a failed call; a sample reports its counters window by window, so none here.
-    const stats = M && handle && m.type !== 'sample' ? takeStats() : { requests: 0, bytes: 0, ms: 0 };
+    // The counters of a failed call (a layout reads nothing, so it has none).
+    const stats = M && handle && m.type !== 'layout' ? takeStats() : { requests: 0, bytes: 0, ms: 0 };
     post({ type: m.type, id: m.id, ok: false, error, stats });
   }
 }

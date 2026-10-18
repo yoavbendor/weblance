@@ -48,6 +48,7 @@ let sample = null;      // {rows, x, y, cluster, centers, labels, captions, grou
 let loadSeq = 0;        // a newer open cancels the older one's results
 let clickSeq = 0;
 let objectUrls = [];
+let imageWait = null;   // the image probe while it runs: a click made before it settles waits for it
 let cssW = 0, cssH = 0, dpr = 1;
 let selected = [];
 let treeRequests = 0;   // Hugging Face tree API requests, for the debug log
@@ -105,28 +106,19 @@ function makeSlot(index) {
   return slot;
 }
 
-// bucket: an object that collects this request's counters (or null).
-function request(slot, msg, { onProgress = null, bucket = null } = {}) {
+// bucket: an object that collects this request's counters (or null). transfer: buffers to move, not copy.
+function request(slot, msg, { bucket = null, transfer = [] } = {}) {
   return new Promise((resolve, reject) => {
-    slot.queue.push({ resolve, reject, onProgress, bucket });
-    slot.worker.postMessage(msg);
+    slot.queue.push({ resolve, reject, bucket });
+    slot.worker.postMessage(msg, transfer);
   });
 }
 
 function onWorkerMessage(slot, m) {
   if (m.type === 'abort') return;  // logged by wlDebug; the reply that follows is the one that counts
-  if (m.type === 'progress') {
-    const head = slot.queue[0];
-    if (head) {
-      addTotals(m.stats, head.bucket);
-      if (head.onProgress) head.onProgress(m);
-    }
-    return;
-  }
   const q = slot.queue.shift();
   if (!q) return;
-  // A sample's counters arrived with its progress messages; its final message repeats them as totals.
-  if (m.type !== 'sample') addTotals(m.stats, q.bucket);
+  addTotals(m.stats, q.bucket);
   if (m.ok) q.resolve(m);
   else q.reject(new Error(m.error || 'worker error'));
 }
@@ -137,15 +129,16 @@ function resetPool() {
   for (let i = 0; i < POOL_SIZE; i++) pool.push(makeSlot(i));
 }
 
-// Each worker opens the table once, on its first request; the requests queue behind the open.
+// Each worker opens the table once. openTable opens all of them at once; the requests queue behind the open.
 function ensureOpen(slot) {
   if (!slot.opening) {
     // debug_fail is a test-only hook: the worker's open fails (see explore-worker.js).
-    slot.opening = request(slot, { type: 'open', ds: tableUrl, fail: params.get('debug_fail') || undefined },
-      { bucket: sampleTotals }).then((m) => {
+    slot.opening = request(slot, { type: 'open', ds: tableUrl, fail: params.get('debug_fail') || undefined }).then((m) => {
+      // Safari reports the module's sizes as 0: then they are absent from the log, not 0 B.
+      const sized = m.module && (m.module.transfer || m.module.decoded);
       wlDebug.log('open', { w: slot.index + 1, ms: r1(m.ms), req: m.stats.requests, bytes: m.stats.bytes,
-        heapBytes: m.heap, jsMB: wlDebug.mem(), wasmBytes: m.module && m.module.transfer,
-        wasmDecodedBytes: m.module && m.module.decoded });
+        heapBytes: m.heap, jsMB: wlDebug.mem(), wasmBytes: sized ? m.module.transfer : undefined,
+        wasmDecodedBytes: sized ? m.module.decoded : undefined });
       return m;
     });
   }
@@ -253,9 +246,9 @@ function sniffImage(b) {
 }
 
 // The first binary column whose value at the middle row is an image.
-async function probeImage(slot, rows, candidates, seq) {
+async function probeImage(slot, rows, candidates, seq, bucket) {
   for (const col of candidates) {
-    const m = await request(slot, { type: 'image', row: Math.floor(rows / 2), col });
+    const m = await request(slot, { type: 'image', row: Math.floor(rows / 2), col }, { bucket });
     if (seq !== loadSeq) return null;
     if (sniffImage(new Uint8Array(m.image))) return col;
   }
@@ -282,29 +275,60 @@ async function openTable(url, seq) {
   resetPool();
   sample = null;
   info = null;
+  imageWait = null;
   selected = [];
   clearGallery();
   setText('s-rows', '-');
   setText('s-sample-requests', '-');
   setText('s-sample-bytes', '-');
+  sampleTotals.requests = 0;
+  sampleTotals.bytes = 0;
   el.hint.textContent = 'Reading the table...';
   setStatus('Opening ' + url.replace('https://huggingface.co/datasets/', '').replace('/resolve/main/', ' / ') + '...');
-  const first = await ensureOpen(pool[0]);
+  // Every worker opens the table at once.
+  const opened = await Promise.all(pool.map((slot) => ensureOpen(slot)));
   if (seq !== loadSeq) return;
-  info = first.info;
+  info = opened[0].info;
   cols = pickColumns(info.fields);
-  setStatus('Checking which binary column holds images...');
-  cols.image = await probeImage(pool[0], info.rows, cols.imageCandidates, seq);
-  if (seq !== loadSeq) return;
-  showColumns();
   if (!cols.vector) {
+    // Nothing to sample: the first images of the table, after the image probe.
+    setStatus('Checking which binary column holds images...');
+    cols.image = await probeOn(pool[0], seq);
+    if (seq !== loadSeq) return;
+    showColumns();
     if (!cols.image) throw new Error('This table has neither an image column nor a vector column.');
     await gridOfImages(seq);
     setStatus(`${info.rows.toLocaleString('en-US')} rows. This table has no vector column, so the page shows its first images.`);
     return;
   }
-  if (!cols.image) showMessage('No binary column holds JPEG, PNG, GIF or WebP images: the map shows no images.');
-  await sampleAndMap(seq);
+  // The map needs no image column, only the clicks do: the probe runs on the last worker while the
+  // sample runs on all of them.
+  const probe = probeOn(pool[POOL_SIZE - 1], seq).then((col) => {
+    if (seq !== loadSeq) return;
+    cols.image = col;
+    imageWait = null;
+    showColumns();
+    if (!cols.image) showMessage('No binary column holds JPEG, PNG, GIF or WebP images: the map shows no images.');
+  }, (e) => {
+    // The map does not need the image column: a failed probe costs the images, not the map.
+    if (seq !== loadSeq) return;
+    cols.image = null;
+    imageWait = null;
+    wlDebug.log('probe.failed', { error: e && e.message ? e.message : String(e) });
+    showMessage('Could not check which column holds images (' + (e && e.message ? e.message : e) + '): the map shows no images.');
+  });
+  imageWait = probe;
+  await sampleAndMap(seq, probe);
+}
+
+// The first binary column that holds images, probed on one worker. Logged as a probe span.
+function probeOn(slot, seq) {
+  const end = wlDebug.span('probe', { w: slot.index + 1 });
+  const bucket = { requests: 0, bytes: 0 };
+  return probeImage(slot, info.rows, cols.imageCandidates, seq, bucket).then((col) => {
+    end({ req: bucket.requests, bytes: bucket.bytes, image: col || 'none' });
+    return col;
+  });
 }
 
 function showColumns() {
@@ -319,31 +343,69 @@ function showColumns() {
     dim: cols.vector && cols.vector.dim, label: cols.label && cols.label.name, caption: cols.caption });
 }
 
-async function sampleAndMap(seq) {
+// The sample: every worker reads the next free window (the windows come back in window order), then one
+// worker lays the vectors out. The last worker joins once the image probe has settled.
+async function sampleAndMap(seq, probe) {
   const n = info.rows;
   const windows = windowPlan(n);
   const total = windows.reduce((a, w) => a + w[1], 0);
   el.hint.textContent = 'Reading ' + total.toLocaleString('en-US') + ' sampled rows...';
   const label = cols.label ? cols.label.name : null;
+  const caption = cols.caption;
   const endSample = wlDebug.span('sample.total', { windows: windows.length, rows: total });
-  const onProgress = (m) => {
-    if (seq !== loadSeq) return;
-    wlDebug.log('sample.window', { start: m.start, rows: m.len, ms: r1(m.ms), req: m.stats.requests, bytes: m.stats.bytes });
-    setText('s-sample-requests', sampleTotals.requests.toLocaleString('en-US'));
-    setText('s-sample-bytes', fmtBytes(sampleTotals.bytes));
-    setStatus(`Reading rows: ${m.done.toLocaleString('en-US')} of ${m.total.toLocaleString('en-US')}; ` +
-      `${fmtBytes(sampleTotals.bytes)} fetched in ${sampleTotals.requests.toLocaleString('en-US')} requests.`);
-  };
+  const parts = new Array(windows.length);
+  let next = 0;
+  let done = 0;
   setStatus(`Reading rows: 0 of ${total.toLocaleString('en-US')}...`);
-  const r = await request(pool[0], {
-    type: 'sample', id: ++clickSeq, windows, vec: cols.vector.name, label, caption: cols.caption,
-  }, { onProgress, bucket: sampleTotals });
+  const lane = async (slot, gate) => {
+    if (gate) await gate;
+    while (next < windows.length && seq === loadSeq) {
+      const k = next++;
+      const [start, len] = windows[k];
+      const m = await request(slot, { type: 'window', id: k, start, len, vec: cols.vector.name, label, caption },
+        { bucket: sampleTotals });
+      if (seq !== loadSeq) return;
+      parts[k] = m;
+      done += len;
+      wlDebug.log('sample.window', { w: slot.index + 1, start, rows: len, ms: r1(m.ms), req: m.stats.requests, bytes: m.stats.bytes });
+      setText('s-sample-requests', sampleTotals.requests.toLocaleString('en-US'));
+      setText('s-sample-bytes', fmtBytes(sampleTotals.bytes));
+      setStatus(`Reading rows: ${done.toLocaleString('en-US')} of ${total.toLocaleString('en-US')}; ` +
+        `${fmtBytes(sampleTotals.bytes)} fetched in ${sampleTotals.requests.toLocaleString('en-US')} requests.`);
+    }
+  };
+  const lanes = pool.map((slot, i) => lane(slot, i === POOL_SIZE - 1 ? probe : null));
+  await Promise.all(lanes).catch((e) => {
+    next = windows.length;  // the other workers stop taking windows
+    throw e;
+  });
   if (seq !== loadSeq) return;
+  endSample({ rows: total, req: sampleTotals.requests, bytes: sampleTotals.bytes, jsMB: wlDebug.mem() });
+  // The windows in window order: one flat vector array, and their rows, labels and captions.
+  const dim = parts[0].dim;
+  let count = 0;
+  for (const p of parts) count += p.rows.length;
+  const rows = new Int32Array(count);
+  const vecs = new Float32Array(count * dim);
+  const labels = label ? [] : null;
+  const captions = caption ? [] : null;
+  let at = 0;
+  for (const p of parts) {
+    rows.set(p.rows, at);
+    vecs.set(p.values, at * dim);
+    if (labels) for (const v of p.labels) labels.push(v);
+    if (captions) for (const v of p.captions) captions.push(v);
+    at += p.rows.length;
+  }
+  const endLayout = wlDebug.span('layout', { rows: count });
+  const r = await request(pool[0], { type: 'layout', id: windows.length, rows, vecs, dim, label, caption, labels, captions,
+    requested: total }, { transfer: [rows.buffer, vecs.buffer] });
+  if (seq !== loadSeq) return;
+  endLayout({ kept: r.kept });
   sample = layoutSample(r, n);
   wlDebug.log('heap', { w: 1, heapBytes: r.heap, jsMB: wlDebug.mem() });
   wlDebug.log('pca', { ms: r1(r.pcaMs), dim: r.dim, kept: r.kept });
   wlDebug.log('kmeans', { ms: r1(r.kmeansMs), k: r.centers.length });
-  endSample({ rows: sample.rows.length, req: sampleTotals.requests, bytes: sampleTotals.bytes, jsMB: wlDebug.mem() });
   setText('s-rows', sample.rows.length.toLocaleString('en-US'));
   setText('s-sample-requests', sampleTotals.requests.toLocaleString('en-US'));
   setText('s-sample-bytes', fmtBytes(sampleTotals.bytes));
@@ -352,9 +414,12 @@ async function sampleAndMap(seq) {
   sizeCanvas();
   endDraw();
   wlDebug.log('classes', { n: new Set(sample.labels).size, byClass: sample.byClass, groups: sample.groupLabels.length });
-  if (!cols.image) el.hint.textContent += ' This table has no image column.';
   setStatus(`Sampled ${sample.rows.length.toLocaleString('en-US')} rows of ${n.toLocaleString('en-US')} ` +
     `in ${sampleTotals.requests.toLocaleString('en-US')} requests (${fmtBytes(sampleTotals.bytes)}). Click the map.`);
+  // The page says what it found only once the image probe has settled.
+  await probe;
+  if (seq !== loadSeq) return;
+  if (!cols.image) el.hint.textContent += ' This table has no image column.';
   // For the browser tests: what the page decided and what it drew.
   window.__explore = {
     table: tableUrl, rows: info.rows, columns: { vector: cols.vector, image: cols.image, label: cols.label, caption: cols.caption },
@@ -606,6 +671,12 @@ function logClickImage(m, w, row, extra) {
 
 function startClick(px, py) {
   if (!sample) return;
+  if (imageWait) {
+    // The image column is not known yet: the click is handled once the probe has settled.
+    const seq = loadSeq;
+    imageWait.then(() => { if (seq === loadSeq) startClick(px, py); }, () => {});
+    return;
+  }
   const id = ++clickSeq;
   const idx = kNearest(px, py, NEIGHBOURS);
   selected = idx;

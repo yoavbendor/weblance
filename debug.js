@@ -292,7 +292,12 @@
     if (env.uad) lines.push('ua-brands: ' + env.uad.brands + ' | platform: ' + env.uad.platform + (env.uad.mobile ? ' | mobile' : ''));
     lines.push('cores=' + env.cores + ' memGB=' + (env.memGB === undefined ? 'n/a' : env.memGB) + ' screen=' + env.screen +
       ' dpr=' + env.dpr + ' lang=' + env.lang, 'url: ' + env.url);
-    if (env.wasm) lines.push('weblance.wasm (this page): transfer=' + fmtBytes(env.wasm.transfer) + ' decoded=' + fmtBytes(env.wasm.decoded));
+    if (env.wasm) {
+      // Safari reports both sizes as 0 for the module: then they are absent, not 0 B.
+      const sized = env.wasm.transfer || env.wasm.decoded;
+      lines.push('weblance.wasm (this page): ' + (sized ? 'transfer=' + fmtBytes(env.wasm.transfer) + ' decoded=' + fmtBytes(env.wasm.decoded)
+        : 'transfer and decoded sizes absent'));
+    }
     if (env.nav) lines.push('navigation: domContentLoaded=' + env.nav.dcl + 'ms load=' + env.nav.load + 'ms');
     if (env.jsLimitMB) lines.push('js heap limit=' + env.jsLimitMB + 'MB');
     return lines;
